@@ -1,0 +1,65 @@
+# This workflow automates scanning your GitHub repository for secrets using git-secrets.
+# It triggers on every push to the main branch.
+
+name: Secret Scanner Pipeline
+
+on:
+  push:
+    branches:
+      - main # Trigger this workflow on pushes to the main branch
+
+jobs:
+  scan-for-secrets:
+    runs-on: ubuntu-latest # Use a fresh Ubuntu runner for each job
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3 # Action to check out your repository code
+
+      - name: Make scan script executable
+        run: chmod +x ./scan.sh # Ensure the script has execute permissions
+
+      - name: Run git-secrets scan
+        id: secret_scan # Assign an ID to this step to reference its output
+        run: ./scan.sh # Execute your scanning script
+        continue-on-error: true # Allow the workflow to continue even if secrets are found,
+                                # so we can send a notification. The `if` condition below
+                                # will handle failing the job explicitly.
+
+      - name: Check for secrets and send Azure Function alert
+        # This step runs only if the 'secret_scan' step failed (i.e., found secrets)
+        if: steps.secret_scan.outcome == 'failure'
+        run: |
+          echo "Secrets detected! Sending alert to Azure Function..."
+          # Read the detected secrets output from the file created by scan.sh
+          # We use `cat` to get the content of the file.
+          DETECTED_SECRETS_CONTENT=$(cat detected_secrets.txt)
+
+          # Construct the JSON payload for the Azure Function
+          # We are sending the repository name, commit SHA, and the detected secrets.
+          PAYLOAD=$(jq -n \
+                    --arg repo "${{ github.repository }}" \
+                    --arg commit "${{ github.sha }}" \
+                    --arg secrets "$DETECTED_SECRETS_CONTENT" \
+                    '{repository: $repo, commit: $commit, detectedSecrets: $secrets}')
+
+          # Send the POST request to your Azure Function URL
+          # Replace YOUR_AZURE_FUNCTION_URL with your actual Function URL
+          # Replace AZURE_FUNCTION_API_KEY with your GitHub Secret name for the Function's API key
+          curl -X POST \
+               -H "Content-Type: application/json" \
+               -d "$PAYLOAD" \
+               "YOUR_AZURE_FUNCTION_URL?code=${{ secrets.AZURE_FUNCTION_API_KEY }}"
+        env:
+          # This environment variable is used by `jq` for JSON manipulation.
+          # `jq` is typically pre-installed on GitHub Actions runners.
+          # If not, you'd add a step to install it.
+          # GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Not strictly needed for this curl call, but useful for GitHub API calls
+
+      - name: Fail the workflow if secrets were found
+        # This step explicitly fails the job if secrets were detected.
+        # This makes the GitHub Actions UI show a red X for the failed workflow run.
+        if: steps.secret_scan.outcome == 'failure'
+        run: |
+          echo "Workflow failed due to detected secrets. Please check the 'Run git-secrets scan' step for details."
+          exit 1
